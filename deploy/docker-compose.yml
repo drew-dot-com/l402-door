@@ -1,0 +1,54 @@
+# l402-door on a TOON node: the door and its own payer sidecar, one compose
+# project. Nothing is host-published. The door joins the node's network so
+# Caddy reaches it as http://l402-door:3503; the payer is reachable only from
+# the door, over this project's private network, because anything that can
+# reach the payer can spend its channel up to the daily cap.
+#
+# Layout next to this file:
+#   door/        this repo            payer/        anonfetch/payer
+#   door-home/   nwc.secret (0600), signing secret, spent credits
+#   payer-home/  id.json (0600, the payer's Solana key), channel store, budget
+#   .env         SOLANA_RPC=…  (0600)
+services:
+  l402-payer:
+    build: ./payer
+    image: l402-payer:local
+    container_name: l402-payer
+    environment:
+      TOON_EDGE: https://connector.mainnet.toonprotocol.dev
+      TOON_DESTINATION: g.drew.anon
+      SOLANA_KEYPAIR: /data/id.json
+      SOLANA_RPC: ${SOLANA_RPC}
+      PAYER_CHANNEL_DEPOSIT: '500000'
+      PAYER_DAILY_CAP: '100000'
+      PAYER_MAX_PRICE: '5000'
+    volumes: ['./payer-home:/data']
+    expose: ['3502']
+    networks: [private]
+    restart: unless-stopped
+
+  l402-door:
+    build: ./door
+    image: l402-door:local
+    container_name: l402-door
+    depends_on: [l402-payer]
+    environment:
+      L402_WALLET: nwc
+      L402_NWC_FILE: /data/nwc.secret
+      L402_PAYER_URL: http://l402-payer:3502
+      L402_PRICE_SATS: '5'
+    volumes: ['./door-home:/data']
+    expose: ['3503']
+    networks: [private, relay_deploy_net]
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3503/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  private:
+  relay_deploy_net:
+    external: true
