@@ -4,7 +4,7 @@ A Lightning front door for a TOON node. An agent pays a Lightning invoice
 (L402: `402`, invoice, macaroon), and the door pays the TOON route from the
 operator's own channel. No connector change; the door is an app beside the node.
 
-Live: `https://l402.167-233-221-236.sslip.io` sells paid anonymous fetch
+Live: `https://l402.mainnet.toonprotocol.dev` sells paid anonymous fetch
 (`g.drew.anon`, the page as markdown with its content hash, fetched over the
 Anyone network) for 5 sats.
 
@@ -70,7 +70,7 @@ pays the invoice over NWC with a daily cap in sats. An agent already using the
 TOON payer (hermes-toon) switches by changing one URL.
 
 ```sh
-LN_NWC_FILE=/path/to/nwc-send.secret L402_DOOR=https://l402.167-233-221-236.sslip.io node client/server.mjs
+LN_NWC_FILE=/path/to/nwc-send.secret L402_DOOR=https://l402.mainnet.toonprotocol.dev node client/server.mjs
 ```
 
 `scripts/buy.mjs <url>` buys one answer by hand from a wallet that shows the

@@ -4,7 +4,7 @@
 //   node scripts/buy.mjs <page url> [door url]
 import readline from 'node:readline/promises'
 
-const [page, door = 'https://l402.167-233-221-236.sslip.io'] = process.argv.slice(2)
+const [page, door = 'https://l402.mainnet.toonprotocol.dev'] = process.argv.slice(2)
 if (!page) { console.error('usage: node scripts/buy.mjs <page url> [door url]'); process.exit(1) }
 const target = `${door}/extract?url=${encodeURIComponent(page)}`
 

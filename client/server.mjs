@@ -2,7 +2,7 @@
 //
 // Env:
 //   LN_NWC_FILE           a nostr+walletconnect:// string that CAN pay (pay_invoice), REQUIRED
-//   L402_DOOR             default https://l402.167-233-221-236.sslip.io
+//   L402_DOOR             default https://l402.mainnet.toonprotocol.dev
 //   LN_PAYER_PORT         default 3504        LN_PAYER_BIND   default 127.0.0.1
 //   LN_PAYER_HOME         ledger, default ~/.l402-payer
 //   LN_DAILY_CAP_SATS     default 500         LN_MAX_PRICE_SATS   default 20
@@ -16,7 +16,7 @@ const env = (k, d) => process.env[k] ?? d
 const PORT = Number(env('LN_PAYER_PORT', 3504))
 const BIND = env('LN_PAYER_BIND', '127.0.0.1')
 const HOME = env('LN_PAYER_HOME', path.join(os.homedir(), '.l402-payer'))
-const DOOR = env('L402_DOOR', 'https://l402.167-233-221-236.sslip.io')
+const DOOR = env('L402_DOOR', 'https://l402.mainnet.toonprotocol.dev')
 const log = (...a) => console.log('[lnpayer]', new Date().toISOString(), ...a)
 const die = (m) => { console.error(`[lnpayer] ${m}`); process.exit(1) }
 
