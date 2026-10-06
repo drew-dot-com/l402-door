@@ -34,7 +34,7 @@ function stubPayer() {
 async function rig(t, over = {}) {
   const payer = stubPayer()
   const payerUrl = await listen(payer.server)
-  const wallet = new MockWallet({ hold: !!over.hold })
+  const wallet = new MockWallet({ hold: !!over.hold, holdMinSats: over.holdMinSats })
   const clock = { ms: Date.UTC(2026, 9, 5) }
   const file = tmp()
   const door = createDoor({ wallet, payerUrl, secret: Buffer.from('s'.repeat(64), 'hex'), credits: new Credits({ file, now: () => clock.ms }), priceSats: 5, now: () => clock.ms, ...over })
@@ -253,4 +253,19 @@ test('hold: a door that restarted after settling buys the answer on redeem', asy
 
 test('a hold door refuses a wallet that cannot hold', () => {
   assert.throws(() => createDoor({ wallet: { name: 'x', makeInvoice: async () => ({}) }, payerUrl: 'http://x', secret: 'k', credits: null, priceSats: 5, hold: true }), /hold invoices need/)
+})
+
+test('hold: a wallet that refuses the hold gets a plain invoice instead, and is not asked again for an hour', async (t) => {
+  const { payer, wallet, clock, get } = await rig(t, { hold: true, holdMinSats: 1000 })
+  const c = await get(path_(PAGE))
+  assert.equal(c.status, 402)
+  assert.equal(c.body.settlement, 'upfront')
+  assert.match(c.body.invoice, /^lnmock5n1/)
+  const auth = { authorization: `L402 ${c.body.macaroon}:${await wallet.pay(c.body.invoice)}` }
+  assert.equal((await get(path_(PAGE), auth)).status, 200)
+  assert.equal(payer.paid, 1)
+  wallet.holdMinSats = 0
+  assert.equal((await get(path_(PAGE))).body.settlement, 'upfront', 'still plain within the hour')
+  clock.ms += 3_600_000
+  assert.equal((await get(path_(PAGE))).body.settlement, 'hold')
 })

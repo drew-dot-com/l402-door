@@ -37,6 +37,11 @@ Pay the invoice, then retry with `Authorization: L402 <macaroon>:<preimage>`.
    without asking the wallet, and serves the kept answer. The credit buys one
    answer.
 
+A wallet can refuse a hold it advertises: Rizful refuses any under 1000 sats,
+so at the default 5 sats the door falls back to a plain invoice (and stops
+asking for an hour). Selling on holds at small prices needs a wallet without
+that floor.
+
 The buyer's side is plain L402 either way; the 402 body says which kind the
 invoice is (`settlement: "hold"` or `"upfront"`). A held payment keeps the
 buyer's wallet waiting while the door fetches, so the fetch is cut off well

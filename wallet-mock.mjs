@@ -19,8 +19,8 @@ export class MockWallet {
   waiting = new Map() // payment hash -> resolve, while a payer's HTLC is held
   cancelled = new Set()
 
-  /** @param o {{hold?: boolean}} */
-  constructor(o = {}) { this.hold = !!o.hold }
+  /** @param o {{hold?: boolean, holdMinSats?: number}} holdMinSats mimics a wallet that refuses small holds */
+  constructor(o = {}) { this.hold = !!o.hold; this.holdMinSats = o.holdMinSats ?? 0 }
 
   async makeInvoice({ sats, memo }) {
     const preimage = randomBytes(32)
@@ -31,6 +31,7 @@ export class MockWallet {
   }
 
   async makeHoldInvoice({ sats, memo, paymentHash }) {
+    if (sats < this.holdMinSats) throw new Error(`amount must be at least ${this.holdMinSats * 1000} msat`)
     const invoice = `lnmockhold${sats}n1${paymentHash}`
     this.invoices.set(invoice, { paymentHash, sats, memo, hold: true })
     return { invoice, paymentHash }

@@ -69,6 +69,7 @@ export function createDoor(o) {
     return r.status === 200 && r.body?.ok ? { ok: true, body: r.body } : { ok: false, code: r.body?.code ?? r.status, error: r.body?.error ?? null }
   }
 
+  let holdRefusedUntil = 0
   const pending = new Map() // payment hash -> {preimage, url, claims, expMs}: hold invoices sold, not yet paid
   const answers = new Map() // payment hash -> {body, exp}: bought while the payment was held, kept for the buyer
   const cancel = (h, why) => o.wallet.cancel(h).then(() => log(`hold ${h.slice(0, 12)} cancelled (${why}), nothing taken`), (e) => log(`hold ${h.slice(0, 12)} cancel FAILED (${why}): ${e?.message ?? e}`))
@@ -133,24 +134,32 @@ export function createDoor(o) {
     const exp = Math.floor(now() / 1000) + creditTtlSec
     const memo = MEMO
     let invoice, paymentHash, preimage
-    if (hold) {
+    let holding = hold && now() >= holdRefusedUntil
+    if (holding) {
       preimage = randomBytes(32).toString('hex')
       paymentHash = sha256hex(Buffer.from(preimage, 'hex'))
-      ;({ invoice } = await o.wallet.makeHoldInvoice({ sats: o.priceSats, memo, expirySec: invoiceTtlSec, paymentHash }))
-    } else {
-      ;({ invoice, paymentHash } = await o.wallet.makeInvoice({ sats: o.priceSats, memo, expirySec: invoiceTtlSec }))
+      try {
+        ;({ invoice } = await o.wallet.makeHoldInvoice({ sats: o.priceSats, memo, expirySec: invoiceTtlSec, paymentHash }))
+      } catch (e) {
+        // A wallet can refuse a hold it advertises (Rizful: none under 1000
+        // sats). Sell a plain invoice instead, and stop asking for an hour.
+        log(`hold invoice refused (${e?.message ?? e}), selling plain invoices for an hour`)
+        holdRefusedUntil = now() + 3_600_000
+        holding = false
+      }
     }
+    if (!holding) ({ invoice, paymentHash } = await o.wallet.makeInvoice({ sats: o.priceSats, memo, expirySec: invoiceTtlSec }))
     const claims = { h: paymentHash, r: ROUTE, q: sha256hex(url), p: o.priceSats, exp }
-    if (hold) pending.set(paymentHash, { preimage, url, claims, expMs: now() + invoiceTtlSec * 1000 })
+    if (holding) pending.set(paymentHash, { preimage, url, claims, expMs: now() + invoiceTtlSec * 1000 })
     const token = mint(o.secret, claims)
     res.setHeader('www-authenticate', `L402 macaroon="${token}", invoice="${invoice}"`)
     return send(res, 402, {
       ok: false, code: 'payment_required',
       price: { sats: o.priceSats }, invoice, macaroon: token, payment_hash: paymentHash,
-      settlement: hold ? 'hold' : 'upfront',
+      settlement: holding ? 'hold' : 'upfront',
       invoice_expires_in: invoiceTtlSec, credit_expires_at: exp,
-      terms: hold
-        ? 'One paid invoice buys one answer for this exact url. Your payment is held, not taken, while the door buys the answer: if the fetch succeeds the payment settles and your wallet gets the preimage; if it fails the door cancels the payment and your sats return. Then retry with `Authorization: L402 <macaroon>:<preimage>`.'
+      terms: holding
+        ? 'One paid invoice buys one answer for this exact url. Your payment is holding, not taken, while the door buys the answer: if the fetch succeeds the payment settles and your wallet gets the preimage; if it fails the door cancels the payment and your sats return. Then retry with `Authorization: L402 <macaroon>:<preimage>`.'
         : 'One paid invoice buys one answer for this exact url. Retry with `Authorization: L402 <macaroon>:<preimage>`. If the fetch fails the credit stays valid until it expires; there are no Lightning refunds.',
     })
   }
