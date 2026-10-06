@@ -51,7 +51,12 @@ export function createLnPayer(o) {
     if (sats > o.maxPriceSats) throw new Refusal(402, 'price_too_high', `door price ${sats} sats exceeds LN_MAX_PRICE_SATS ${o.maxPriceSats}`)
     if (state.spent + sats > o.dailyCapSats) throw new Refusal(402, 'budget_exhausted', `daily cap ${o.dailyCapSats} sats reached (${state.spent} spent today, ${sats} asked)`)
     const t0 = now()
-    const preimage = await o.payInvoice(c.body.invoice)
+    let preimage
+    try { preimage = await o.payInvoice(c.body.invoice) } catch (e) {
+      // A door selling on hold invoices cancels the payment when its fetch
+      // fails, which reaches this side as a failed payment.
+      throw new Refusal(502, 'payment_failed', `the invoice was not paid: ${e?.message ?? e}`, { door_settlement: c.body.settlement ?? null, payment_hash: c.body.payment_hash ?? null })
+    }
     record(sats)
     const auth = { authorization: `L402 ${c.body.macaroon}:${preimage}` }
     let r = await ask(url, auth)

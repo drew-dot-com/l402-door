@@ -6,7 +6,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { createDoor } from '../door.mjs'
 import { Credits } from '../credits.mjs'
-import { MockWallet } from '../wallet-mock.mjs'
+import { MockWallet, PaymentCancelled } from '../wallet-mock.mjs'
 import { mint, open, parseAuth, preimageMatches, sha256hex } from '../token.mjs'
 
 const listen = (server) => new Promise((ok) => server.listen(0, '127.0.0.1', () => ok(`http://127.0.0.1:${server.address().port}`)))
@@ -34,17 +34,18 @@ function stubPayer() {
 async function rig(t, over = {}) {
   const payer = stubPayer()
   const payerUrl = await listen(payer.server)
-  const wallet = new MockWallet()
+  const wallet = new MockWallet({ hold: !!over.hold })
   const clock = { ms: Date.UTC(2026, 9, 5) }
   const file = tmp()
   const door = createDoor({ wallet, payerUrl, secret: Buffer.from('s'.repeat(64), 'hex'), credits: new Credits({ file, now: () => clock.ms }), priceSats: 5, now: () => clock.ms, ...over })
+  await door.ready
   const base = await listen(door)
   t.after(() => { door.close(); payer.server.close() })
   const get = async (p, headers = {}) => { const r = await fetch(base + p, { headers }); return { status: r.status, headers: r.headers, body: await r.json() } }
   const buy = async (url) => {
     const c = await get(`/extract?url=${encodeURIComponent(url)}`)
     assert.equal(c.status, 402)
-    return { auth: { authorization: `L402 ${c.body.macaroon}:${wallet.pay(c.body.invoice)}` }, challenge: c }
+    return { auth: { authorization: `L402 ${c.body.macaroon}:${await wallet.pay(c.body.invoice)}` }, challenge: c }
   }
   return { payer, wallet, clock, base, get, buy, file }
 }
@@ -181,4 +182,75 @@ test('bad urls and the mock pay route', async (t) => {
   const h = await get('/health')
   assert.equal(h.body.wallet, 'mock')
   assert.equal(h.body.payer_ok, true)
+})
+
+test('hold: the payment is held while the door buys, settles on success, and the kept answer is served', async (t) => {
+  const { payer, wallet, get } = await rig(t, { hold: true })
+  const c = await get(path_(PAGE))
+  assert.equal(c.status, 402)
+  assert.equal(c.body.settlement, 'hold')
+  assert.match(c.body.invoice, /^lnmockhold5n1[0-9a-f]{64}$/)
+  assert.equal(payer.paid, 0, 'nothing is bought before the payment is held')
+
+  const preimage = await wallet.pay(c.body.invoice) // resolves only once the door settled
+  assert.equal(preimageMatches(preimage, c.body.payment_hash), true)
+  assert.equal(payer.paid, 1, 'the answer was bought while the payment was held')
+
+  const auth = { authorization: `L402 ${c.body.macaroon}:${preimage}` }
+  const a = await get(path_(PAGE), auth)
+  assert.equal(a.status, 200)
+  assert.equal(a.body.content, '# T')
+  assert.equal(a.body.paid.sats, 5)
+  assert.equal(payer.paid, 1, 'the kept answer is served, not bought again')
+  assert.equal((await get(path_(PAGE), auth)).body.code, 'credit_spent')
+})
+
+test('hold: a failed fetch cancels the payment, so nothing is taken', async (t) => {
+  const { payer, wallet, get } = await rig(t, { hold: true })
+  const c = await get(path_(PAGE))
+  payer.fail = true
+  await assert.rejects(wallet.pay(c.body.invoice), PaymentCancelled)
+  assert.equal(wallet.cancelled.has(c.body.payment_hash), true)
+  assert.equal(payer.paid, 0)
+  // Paying the same invoice again is refused too: it is cancelled for good.
+  await assert.rejects(wallet.pay(c.body.invoice), PaymentCancelled)
+})
+
+test('hold: a held payment the door did not sell is cancelled only when it carries the door memo', async (t) => {
+  const { payer, wallet } = await rig(t, { hold: true })
+  const forgotten = 'ab'.repeat(32), foreign = 'cd'.repeat(32)
+  wallet.onHeld({ paymentHash: forgotten, msat: 5000, description: 'l402-door extract' })
+  wallet.onHeld({ paymentHash: foreign, msat: 5000, description: 'someone else' })
+  await new Promise((ok) => setTimeout(ok, 20))
+  assert.equal(wallet.cancelled.has(forgotten), true)
+  assert.equal(wallet.cancelled.has(foreign), false)
+  assert.equal(payer.paid, 0)
+})
+
+test('hold: an underpaid HTLC is cancelled without buying', async (t) => {
+  const { payer, wallet, get } = await rig(t, { hold: true })
+  const c = await get(path_(PAGE))
+  wallet.onHeld({ paymentHash: c.body.payment_hash, msat: 4000, description: 'l402-door extract' })
+  await new Promise((ok) => setTimeout(ok, 20))
+  assert.equal(wallet.cancelled.has(c.body.payment_hash), true)
+  assert.equal(payer.paid, 0)
+})
+
+test('hold: a door that restarted after settling buys the answer on redeem', async (t) => {
+  const { payer, wallet, get } = await rig(t, { hold: true })
+  const c = await get(path_(PAGE))
+  const preimage = await wallet.pay(c.body.invoice)
+  assert.equal(payer.paid, 1)
+  // A fresh door with the same secret and empty memory: the kept answer is gone.
+  const file = tmp()
+  const door2 = createDoor({ wallet: new MockWallet(), payerUrl: `http://127.0.0.1:${payer.server.address().port}`, secret: Buffer.from('s'.repeat(64), 'hex'), credits: new Credits({ file, now: () => Date.UTC(2026, 9, 5) }), priceSats: 5, now: () => Date.UTC(2026, 9, 5) })
+  const base2 = await listen(door2)
+  t.after(() => door2.close())
+  const r = await fetch(`${base2}${path_(PAGE)}`, { headers: { authorization: `L402 ${c.body.macaroon}:${preimage}` } })
+  assert.equal(r.status, 200)
+  assert.equal(payer.paid, 2)
+})
+
+test('a hold door refuses a wallet that cannot hold', () => {
+  assert.throws(() => createDoor({ wallet: { name: 'x', makeInvoice: async () => ({}) }, payerUrl: 'http://x', secret: 'k', credits: null, priceSats: 5, hold: true }), /hold invoices need/)
 })

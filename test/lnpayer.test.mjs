@@ -24,15 +24,16 @@ async function rig(t, over = {}) {
     toon.paid += 1
     return json(200, { ok: true, url: u.searchParams.get('url'), status: 200, title: 'T', content: '# T', content_hash: 'abc', price: { units: '1000' }, node: {}, budget: {} })
   })
-  const wallet = new MockWallet()
-  const door = createDoor({ wallet, payerUrl: await listen(toonPayer), secret: 'k', credits: new Credits({ file: tmp('spent.jsonl') }), priceSats: 5 })
+  const wallet = new MockWallet({ hold: !!over.hold })
+  const door = createDoor({ wallet, hold: !!over.hold, payerUrl: await listen(toonPayer), secret: 'k', credits: new Credits({ file: tmp('spent.jsonl') }), priceSats: 5 })
+  await door.ready
   const doorUrl = await listen(door)
   const paid = []
   const ln = createLnPayer({ doorUrl, file: tmp('budget.json'), dailyCapSats: 12, maxPriceSats: 20, payInvoice: async (inv) => { paid.push(inv); return wallet.pay(inv) }, ...over })
   const base = await listen(ln)
   t.after(() => { ln.close(); door.close(); toonPayer.close() })
   const get = async (p) => { const r = await fetch(base + p); return { status: r.status, body: await r.json() } }
-  return { toon, paid, get }
+  return { toon, paid, get, wallet }
 }
 
 test('the agent asks once and gets the page; the sidecar paid one invoice', async (t) => {
@@ -73,4 +74,22 @@ test('health and bad input', async (t) => {
   assert.equal(h.body.door_ok, true)
   assert.deepEqual(h.body.door_price, { sats: 5 })
   assert.equal((await get('/extract?url=nope')).body.code, 'bad_url')
+})
+
+test('hold door: the agent gets the page, and a failed fetch costs nothing', async (t) => {
+  const { toon, paid, get } = await rig(t, { hold: true })
+  const r = await get('/extract?url=https://example.com/a')
+  assert.equal(r.status, 200)
+  assert.equal(r.body.content, '# T')
+  assert.equal(r.body.budget.spent, 5)
+  assert.equal(toon.paid, 1)
+
+  toon.fail = true
+  const f = await get('/extract?url=https://example.com/b')
+  assert.equal(f.status, 502)
+  assert.equal(f.body.code, 'payment_failed')
+  assert.equal(f.body.door_settlement, 'hold')
+  assert.equal(paid.length, 2)
+  const b = await get('/budget')
+  assert.equal(b.body.budget.spent, 5, 'a cancelled payment is not counted against the cap')
 })

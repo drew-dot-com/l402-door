@@ -10,6 +10,8 @@
 //   L402_HOME               signing secret + spent credits, default ~/.l402-door
 //   L402_INVOICE_TTL_SEC    default 600           L402_CREDIT_TTL_SEC   default 3600
 //   L402_MAX_INVOICES_PER_MIN  default 60
+//   L402_HOLD               `auto` (default) sells on hold invoices when the wallet can hold, `on` requires it, `off` never
+//   L402_HOLD_FETCH_TIMEOUT_MS  how long a held payment waits on the fetch, default 40000 (NWC payers give up at 60 s)
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -25,25 +27,29 @@ const BIND = env('L402_BIND', '127.0.0.1')
 const HOME = env('L402_HOME', path.join(os.homedir(), '.l402-door'))
 const PAYER_URL = env('L402_PAYER_URL', 'http://127.0.0.1:3502')
 const PRICE_SATS = Number(env('L402_PRICE_SATS', 5))
+const HOLD = env('L402_HOLD', 'auto')
 const VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 const log = (...a) => console.log('[door]', new Date().toISOString(), ...a)
 const die = (msg) => { console.error(`[door] ${msg}`); process.exit(1) }
 
 if (!Number.isInteger(PRICE_SATS) || PRICE_SATS < 1) die('L402_PRICE_SATS must be a whole number of sats, 1 or more')
+if (!['auto', 'on', 'off'].includes(HOLD)) die('L402_HOLD must be auto, on or off')
 
 let wallet
 const kind = env('L402_WALLET', '')
 if (kind === 'mock') {
   if (BIND !== '127.0.0.1' && BIND !== '::1') die('the mock wallet gives its preimages away; it only runs bound to loopback')
-  wallet = new MockWallet()
+  wallet = new MockWallet({ hold: true })
 } else if (kind === 'nwc') {
   const file = env('L402_NWC_FILE', path.join(HOME, 'nwc.secret'))
   if (!fs.existsSync(file)) die(`no NWC connection string at ${file} (L402_NWC_FILE)`)
   wallet = new NwcWallet({ url: fs.readFileSync(file, 'utf8').trim() })
   const info = await wallet.check().catch((e) => die(`wallet check failed: ${e?.message ?? e}`))
-  log(`wallet ${info.alias ?? '?'} on ${info.network ?? '?'}, methods ${info.methods.join(',')}`)
+  log(`wallet ${info.alias ?? '?'} on ${info.network ?? '?'}, methods ${info.methods.join(',')}, can hold: ${info.hold}`)
 } else die('set L402_WALLET (mock or nwc)')
+if (HOLD === 'on' && !wallet.hold) die('L402_HOLD=on but the wallet cannot hold (needs the hold invoice methods and hold_invoice_accepted notifications)')
+const hold = HOLD !== 'off' && wallet.hold
 
 // The signing secret is made once and kept; losing it voids unspent credits and nothing else.
 fs.mkdirSync(HOME, { recursive: true })
@@ -52,7 +58,8 @@ if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, randomBytes(32).toS
 const secret = Buffer.from(fs.readFileSync(secretFile, 'utf8').trim(), 'hex')
 
 const server = createDoor({
-  wallet, secret, log, version: VERSION,
+  wallet, secret, log, version: VERSION, hold,
+  holdFetchTimeoutMs: Number(env('L402_HOLD_FETCH_TIMEOUT_MS', 40_000)),
   payerUrl: PAYER_URL,
   priceSats: PRICE_SATS,
   credits: new Credits({ file: path.join(HOME, 'spent.jsonl') }),
@@ -61,8 +68,9 @@ const server = createDoor({
   maxInvoicesPerMin: Number(env('L402_MAX_INVOICES_PER_MIN', 60)),
 })
 
+await server.ready.catch((e) => die(`cannot watch for held payments: ${e?.message ?? e}`))
 server.listen(PORT, BIND, () => {
-  log(`v${VERSION} listening on http://${BIND}:${PORT} selling extract at ${PRICE_SATS} sats, wallet ${wallet.name}, payer ${PAYER_URL}`)
+  log(`v${VERSION} listening on http://${BIND}:${PORT} selling extract at ${PRICE_SATS} sats on ${hold ? 'hold' : 'upfront'} invoices, wallet ${wallet.name}, payer ${PAYER_URL}`)
   if (wallet.name === 'mock') log('MOCK WALLET: no money moves and POST /mock/pay hands out preimages')
 })
 
