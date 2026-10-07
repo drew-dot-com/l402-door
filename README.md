@@ -19,10 +19,12 @@ Pay the invoice, then retry with `Authorization: L402 <macaroon>:<preimage>`.
 
 ## How it works
 
-1. The door asks its wallet for an invoice over Nostr Wallet Connect and signs
-   a token binding the payment hash to this request, this URL, this price and
-   an expiry. The token rides in the L402 `macaroon` field, which clients treat
-   as opaque.
+1. The door asks its wallet for an invoice over Nostr Wallet Connect and mints
+   a real macaroon (libmacaroons v2, base64) whose identifier is aperture's
+   L402 layout (version, payment hash, token id) and whose first-party caveats
+   bind it to this request, this URL, this price and an expiry. Clients that
+   decode the field as a macaroon (lnget, aperture) accept it; clients that
+   keep it opaque (402-mcp) echo it back.
 2. The buyer pays. With a wallet that can hold (the default when it can), the
    invoice is a **hold invoice** for a preimage only the door knows, so the
    payment is held, not taken. The door sees the HTLC held and buys the answer

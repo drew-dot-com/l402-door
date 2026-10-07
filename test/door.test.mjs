@@ -8,6 +8,7 @@ import { createDoor } from '../door.mjs'
 import { Credits } from '../credits.mjs'
 import { MockWallet, PaymentCancelled } from '../wallet-mock.mjs'
 import { mint, open, parseAuth, preimageMatches, sha256hex } from '../token.mjs'
+import { importMacaroon } from 'macaroon'
 
 const listen = (server) => new Promise((ok) => server.listen(0, '127.0.0.1', () => ok(`http://127.0.0.1:${server.address().port}`)))
 const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'door-')), 'spent.jsonl')
@@ -53,16 +54,35 @@ async function rig(t, over = {}) {
 const PAGE = 'https://example.com/a'
 const path_ = (url) => `/extract?url=${encodeURIComponent(url)}`
 
-test('token: round trip, tamper, wrong secret', () => {
-  const claims = { h: 'aa', r: 'extract', q: 'bb', p: 5, exp: 10 }
+test('token: a real macaroon, round trip, tamper, wrong secret', () => {
+  const h = 'aa'.repeat(32)
+  const claims = { h, r: 'extract', q: 'bb'.repeat(32), p: 5, exp: 10 }
   const t = mint('k', claims)
   assert.deepEqual(open('k', t), { v: 1, ...claims })
   assert.equal(open('other', t), null)
-  const [body, mac] = t.split('.')
-  const forged = Buffer.from(JSON.stringify({ v: 1, ...claims, p: 0 })).toString('base64url')
-  assert.equal(open('k', `${forged}.${mac}`), null)
-  assert.equal(open('k', body), null)
+  // What the clients require: lnget base64-decodes the field and unmarshals a
+  // libmacaroons v2 macaroon whose identifier is aperture's L402 layout;
+  // 402-mcp only accepts base64 characters (no dots).
+  assert.match(t, /^[A-Za-z0-9+/=]+$/)
+  const m = importMacaroon(new Uint8Array(Buffer.from(t, 'base64')))
+  const id = Buffer.from(m.identifier)
+  assert.equal(id.length, 66)
+  assert.equal(id.readUInt16BE(0), 0)
+  assert.equal(id.subarray(2, 34).toString('hex'), h)
+  assert.deepEqual(m.caveats.map((c) => Buffer.from(c.identifier).toString()), ['route = extract', `request = ${claims.q}`, 'price_sats = 5', 'expires = 10'])
+  // Editing a caveat byte for byte breaks the HMAC chain; so does adding one; so does another door's key.
+  const raw = Buffer.from(t, 'base64')
+  const at = raw.indexOf('price_sats = 5')
+  assert.ok(at > 0)
+  const edited = Buffer.from(raw); edited.write('price_sats = 0', at)
+  assert.equal(open('k', edited.toString('base64')), null)
+  const extended = importMacaroon(new Uint8Array(raw))
+  extended.addFirstPartyCaveat('expires = 99')
+  assert.equal(open('k', Buffer.from(extended.exportBinary()).toString('base64')), null)
+  // A client may echo the field in url-safe base64.
+  assert.deepEqual(open('k', raw.toString('base64url')), { v: 1, ...claims })
   assert.equal(open('k', 'junk'), null)
+  assert.equal(open('k', ''), null)
 })
 
 test('token: auth header and preimage', () => {

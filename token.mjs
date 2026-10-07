@@ -1,34 +1,50 @@
-// The door's credential, pure: an HMAC-signed token that binds one Lightning
-// payment hash to one request at one price. It rides in the L402 `macaroon`
-// field; clients treat that field as opaque, so a signed token is enough and
-// the door needs no macaroon library. Proof of payment is the preimage:
-// sha256(preimage) must equal the hash the token carries, which the door
-// checks without asking the wallet anything.
-import { createHmac, createHash, timingSafeEqual } from 'node:crypto'
-
-const b64 = (x) => Buffer.from(x).toString('base64url')
+// The door's credential: a real macaroon (libmacaroons v2 binary, base64), so
+// every L402 client that decodes the `macaroon` field as one (lnget, aperture,
+// anything on gopkg.in/macaroon.v2) accepts it, and clients that keep it
+// opaque (402-mcp) can echo it back. The identifier is aperture's L402 layout:
+// a 2-byte version (0), the 32-byte payment hash, a 32-byte token id. The
+// request binding rides as first-party caveats, HMAC-chained from the door's
+// secret, so nothing can be edited. Proof of payment is the preimage:
+// sha256(preimage) must equal the hash in the identifier, which the door checks
+// without asking the wallet anything.
+import { createHash, randomBytes } from 'node:crypto'
+import { newMacaroon, importMacaroon } from 'macaroon'
 
 export const sha256hex = (x) => createHash('sha256').update(x).digest('hex')
 
-const sign = (secret, body) => createHmac('sha256', secret).update(body).digest()
+const LOCATION = 'l402-door'
+const ID_LEN = 2 + 32 + 32
+const rootKey = (secret) => new Uint8Array(createHash('sha256').update(String(secret)).digest())
+const text = new TextEncoder()
 
-/** @param claims {{h: string, r: string, q: string, p: number, exp: number}} hash, route, request hash, price in sats, expiry (unix seconds) */
+/** @param claims {{h: string, r: string, q: string, p: number, exp: number}} payment hash (hex), route, request hash, price in sats, expiry (unix seconds) */
 export function mint(secret, claims) {
-  const body = b64(JSON.stringify({ v: 1, ...claims }))
-  return `${body}.${b64(sign(secret, body))}`
+  const identifier = new Uint8Array(Buffer.concat([Buffer.from([0, 0]), Buffer.from(claims.h, 'hex'), randomBytes(32)]))
+  if (identifier.length !== ID_LEN) throw new Error('payment hash must be 32 bytes')
+  const m = newMacaroon({ version: 2, rootKey: rootKey(secret), identifier, location: LOCATION })
+  for (const c of [`route = ${claims.r}`, `request = ${claims.q}`, `price_sats = ${claims.p}`, `expires = ${claims.exp}`]) m.addFirstPartyCaveat(text.encode(c))
+  return Buffer.from(m.exportBinary()).toString('base64')
 }
 
-/** The claims when the signature holds, else null. Expiry is the caller's check. */
+/** The claims when the macaroon was minted by this door and is intact, else null. Expiry is the caller's check. */
 export function open(secret, token) {
-  const [body, mac, ...rest] = String(token).split('.')
-  if (!body || !mac || rest.length) return null
-  const want = sign(secret, body)
-  const got = Buffer.from(mac, 'base64url')
-  if (got.length !== want.length || !timingSafeEqual(got, want)) return null
+  let m
+  try { m = importMacaroon(new Uint8Array(Buffer.from(String(token), 'base64'))) } catch { return null }
+  if (!m || Array.isArray(m)) return null
+  const id = Buffer.from(m.identifier)
+  if (id.length !== ID_LEN || id.readUInt16BE(0) !== 0) return null
+  const got = {}
   try {
-    const claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
-    return claims?.v === 1 ? claims : null
+    m.verify(rootKey(secret), (cond) => {
+      const mm = /^([a-z_]+) = (.*)$/.exec(String(cond))
+      if (!mm || mm[1] in got) return 'unknown caveat'
+      got[mm[1]] = mm[2]
+      return null
+    })
   } catch { return null }
+  const p = Number(got.price_sats), exp = Number(got.expires)
+  if (!got.route || !got.request || !Number.isInteger(p) || !Number.isInteger(exp)) return null
+  return { v: 1, h: id.subarray(2, 34).toString('hex'), r: got.route, q: got.request, p, exp }
 }
 
 export function preimageMatches(preimage, paymentHash) {
@@ -36,7 +52,7 @@ export function preimageMatches(preimage, paymentHash) {
   return sha256hex(Buffer.from(preimage, 'hex')) === String(paymentHash).toLowerCase()
 }
 
-/** `Authorization: L402 <token>:<preimage>` (LSAT is the older spelling of the same scheme). */
+/** `Authorization: L402 <macaroon>:<preimage>` (LSAT is the older spelling of the same scheme). */
 export function parseAuth(header) {
   const m = /^(?:L402|LSAT)\s+(\S+)$/i.exec(String(header ?? '').trim())
   if (!m) return null

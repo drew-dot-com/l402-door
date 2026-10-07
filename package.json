@@ -1,6 +1,6 @@
 {
   "name": "l402-door",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "A Lightning (L402) front door for a TOON node: an agent pays a Lightning invoice, the door pays the TOON route from the operator's own channel through the payer sidecar",
   "type": "module",
@@ -13,6 +13,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@getalby/sdk": "^8.0.3"
+    "@getalby/sdk": "^8.0.3",
+    "macaroon": "^3.0.4"
   }
 }
