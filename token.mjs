@@ -23,7 +23,30 @@ export function mint(secret, claims) {
   if (identifier.length !== ID_LEN) throw new Error('payment hash must be 32 bytes')
   const m = newMacaroon({ version: 2, rootKey: rootKey(secret), identifier, location: LOCATION })
   for (const c of [`route = ${claims.r}`, `request = ${claims.q}`, `price_sats = ${claims.p}`, `expires = ${claims.exp}`]) m.addFirstPartyCaveat(text.encode(c))
-  return Buffer.from(m.exportBinary()).toString('base64')
+  return serialize(m).toString('base64')
+}
+
+// libmacaroons v2 binary: a version byte, then fields (uvarint type, uvarint
+// length, bytes; types: 1 location, 2 identifier, 4 vid, 6 signature) with EOS
+// bytes between sections. Written here because the
+// package's own exporter grows its buffer without bound on Node 22 (its
+// `_grow` compares against a capacity it never sets) and dies on a macaroon
+// this size.
+const uvarint = (n) => { const out = []; while (n >= 0x80) { out.push((n & 0x7f) | 0x80); n >>>= 7 } out.push(n); return Buffer.from(out) }
+const field = (type, bytes) => Buffer.concat([uvarint(type), uvarint(bytes.length), Buffer.from(bytes)])
+const EOS = Buffer.from([0])
+export function serialize(m) {
+  const parts = [Buffer.from([2])]
+  if (m.location) parts.push(field(1, text.encode(m.location)))
+  parts.push(field(2, m.identifier), EOS)
+  for (const c of m.caveats) {
+    if (c.location) parts.push(field(1, text.encode(c.location)))
+    parts.push(field(2, c.identifier))
+    if (c.vid) parts.push(field(4, c.vid))
+    parts.push(EOS)
+  }
+  parts.push(EOS, field(6, m.signature))
+  return Buffer.concat(parts)
 }
 
 /** The claims when the macaroon was minted by this door and is intact, else null. Expiry is the caller's check. */

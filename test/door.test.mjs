@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import { createDoor } from '../door.mjs'
 import { Credits } from '../credits.mjs'
 import { MockWallet, PaymentCancelled } from '../wallet-mock.mjs'
-import { mint, open, parseAuth, preimageMatches, sha256hex } from '../token.mjs'
+import { mint, open, parseAuth, preimageMatches, sha256hex, serialize } from '../token.mjs'
 import { importMacaroon } from 'macaroon'
 
 const listen = (server) => new Promise((ok) => server.listen(0, '127.0.0.1', () => ok(`http://127.0.0.1:${server.address().port}`)))
@@ -78,7 +78,9 @@ test('token: a real macaroon, round trip, tamper, wrong secret', () => {
   assert.equal(open('k', edited.toString('base64')), null)
   const extended = importMacaroon(new Uint8Array(raw))
   extended.addFirstPartyCaveat('expires = 99')
-  assert.equal(open('k', Buffer.from(extended.exportBinary()).toString('base64')), null)
+  assert.equal(open('k', serialize(extended).toString('base64')), null)
+  // Our serializer and the package's reader agree byte for byte.
+  assert.deepEqual(serialize(importMacaroon(new Uint8Array(raw))), raw)
   // A client may echo the field in url-safe base64.
   assert.deepEqual(open('k', raw.toString('base64url')), { v: 1, ...claims })
   assert.equal(open('k', 'junk'), null)
